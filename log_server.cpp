@@ -77,17 +77,18 @@ std::string generate_dummy_file(int flow_size_kb, const std::string& file_name) 
         return "";
     }
 
-    int flow_size_bytes = flow_size_kb * 1024;
+    int flow_size_bytes = flow_size_kb*1024;
 
     // Seek to the size minus one, and then write a single byte to set the file size
-    file.seekp(flow_size_bytes*1024 - 1);
+    file.seekp(flow_size_bytes - 1);
     file.write("", 1);
     file.close();
     return destination;  // Return the full path to the file
 }
 
-// Function to run BPF trace
-pid_t run_bpftrace(const std::string& save_dir, int port) {
+
+// Updated function to run BPF trace
+pid_t run_bpftrace(const std::string& save_dir, const std::string& client_ip) {
     pid_t pid = fork();
 
     if (pid == -1) {
@@ -96,10 +97,9 @@ pid_t run_bpftrace(const std::string& save_dir, int port) {
     }
 
     if (pid == 0) {
-        std::string port_str = std::to_string(port);
         const char* command = "sudo";
-        const char* script = "./run_bpftrace.sh";
-        execlp(command, command, script, save_dir.c_str(), port_str.c_str(), nullptr);
+        const char* script = "./run_bpftrace2.sh";
+        execlp(command, command, script, save_dir.c_str(), client_ip.c_str(), nullptr);
 
         std::cerr << "Failed to execute bpftrace script." << std::endl;
         _exit(1);
@@ -108,8 +108,15 @@ pid_t run_bpftrace(const std::string& save_dir, int port) {
     return pid;
 }
 
+
 // Function to handle client requests
 void handle_client(int client_socket, sockaddr_in client_addr, int port) {
+
+    // Get client IP address
+    char client_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(client_addr.sin_addr), client_ip, INET_ADDRSTRLEN);
+    std::string client_ip_str(client_ip);
+
     char buffer[4096];
     int data_len = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
     if (data_len <= 0) {
@@ -143,13 +150,26 @@ void handle_client(int client_socket, sockaddr_in client_addr, int port) {
         return;
     }
 
-    std::string congestion_control = body.substr(cc_pos + 18, body.find('&', cc_pos) - (cc_pos + 18));// Extract the flow_size and repeat_number strings first
+    // Extract values
+    std::string congestion_control = body.substr(cc_pos + 19, body.find('&', cc_pos) - (cc_pos + 19));
     std::string flow_size_str = body.substr(fs_pos + 10, body.find('&', fs_pos) - (fs_pos + 10));
-    std::string repeat_number_str = body.substr(rn_pos + 15, body.find('&', rn_pos) - (rn_pos + 15));
 
-    // Convert the extracted strings to integers
+    if (rn_pos == std::string::npos) {
+        std::cerr << "Invalid POST data: Missing repeat_number parameter." << std::endl;
+        close(client_socket);
+        return;
+    }
+
+    // Extract repeat_number value
+    std::string repeat_number_str = body.substr(rn_pos + 14); // +14 to skip "repeat_number="
+
+    std::cout << "Body: " << body << std::endl;
+    std::cout << "Parsed values: " << congestion_control << " " << flow_size_str << " " << repeat_number_str << std::endl;
+
     int flow_size = std::stoi(flow_size_str);
     int repeat_number = std::stoi(repeat_number_str);
+
+    std::cout << "Converted values: Flow Size = " << flow_size << ", Repeat Number = " << repeat_number << std::endl;
 
 
     // Set congestion control algorithm
@@ -171,7 +191,6 @@ void handle_client(int client_socket, sockaddr_in client_addr, int port) {
         return;
     }
 
-    std::cout << "Why" << std::endl;
     std::string file_name = "dummy_file_" + std::to_string(flow_size) + ".bin";
 
     // Generate the file directly in the web server's root directory
@@ -183,57 +202,98 @@ void handle_client(int client_socket, sockaddr_in client_addr, int port) {
         return;
     }
 
-    std::cout << "Why2" << std::endl;
-
     // No need to move the file since it's already created in the correct directory
 
     // Get the server's IP address
     std::string server_ip = get_server_ip();  // Replace with actual function to get server IP
     std::string download_url = "http://" + server_ip + "/" + file_name;
 
-
-    std::cout << "Why2-2" << std::endl;
-
     // Start BPF trace
-    std::string save_dir = "result/" + congestion_control + "_" + std::to_string(flow_size) + "_" + std::to_string(repeat_number) + "_" + std::to_string(time(nullptr));
-    pid_t bpf_process = run_bpftrace(save_dir, port);
+    std::string save_dir = congestion_control + "_" + std::to_string(flow_size) + "_" + std::to_string(repeat_number) + "_" + std::to_string(time(nullptr));
+    pid_t bpf_process = run_bpftrace(save_dir, client_ip_str);
 
-    std::cout << "Why3" << std::endl;
     // Send download URL to client
-    send(client_socket, download_url.c_str(), download_url.size(), 0);
+    // In the handle_client function, replace the direct send with:
+    std::string response = "HTTP/1.1 200 OK\r\n";
+    response += "Content-Type: text/plain\r\n";
+    response += "Content-Length: " + std::to_string(download_url.size()) + "\r\n";
+    response += "\r\n";
+    response += download_url;
 
+    send(client_socket, response.c_str(), response.size(), 0);
 
-    std::cout << "Why4" << std::endl;
-
-    // Wait for flow completion time from client
-    data_len = recv(client_socket, buffer, sizeof(buffer), 0);
-    if (data_len > 0) {
-        buffer[data_len] = '\0';
-        std::string flow_completion_data(buffer);
-
-        // Parse the CSV data from the client
-        std::vector<double> fct_values;
-        std::istringstream ss(flow_completion_data);
-        std::string line;
-        while (std::getline(ss, line)) {
-            std::istringstream line_stream(line);
-            std::string index_str, fct_str;
-            if (std::getline(line_stream, index_str, ',') && std::getline(line_stream, fct_str, ',')) {
-                try {
-                    double fct_value = std::stod(fct_str);
-                    fct_values.push_back(fct_value);
-                } catch (const std::invalid_argument&) {
-                    std::cerr << "Invalid FCT value: " << fct_str << std::endl;
-                }
-            }
+    std::string received_data;
+    buffer[4096];
+    int total_bytes = 0;
+    int bytes_received;
+    while ((bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0)) > 0) {
+        total_bytes += bytes_received;
+        buffer[bytes_received] = '\0';
+        received_data += buffer;
+        
+        // Check if we've received the entire message
+        if (received_data.find("\r\n\r\n") != std::string::npos) {
+            break;
         }
+    }
 
-        // Calculate mean and standard deviation
+    if (total_bytes <= 0) {
+        std::cerr << "Error receiving data from client." << std::endl;
+        close(client_socket);
+        return;
+    }
+
+    // Separate headers from body
+    std::size_t header_end = received_data.find("\r\n\r\n");
+    if (header_end == std::string::npos) {
+        std::cerr << "Invalid HTTP request: No header-body separation found." << std::endl;
+        close(client_socket);
+        return;
+    }
+
+    std::string headers = received_data.substr(0, header_end);
+    body = received_data.substr(header_end + 4);  // +4 to skip "\r\n\r\n"
+
+    // Trim any leading or trailing whitespace from the body
+    body.erase(0, body.find_first_not_of(" \n\r\t"));
+    body.erase(body.find_last_not_of(" \n\r\t") + 1);
+
+    std::cout << "Received headers:\n" << headers << std::endl;
+    std::cout << "Received body: " << body << std::endl;
+
+    // Parse the CSV data from the body
+    std::vector<double> fct_values;
+    std::istringstream ss(body);
+    std::string fct_str;
+
+    while (std::getline(ss, fct_str, ',')) {
+        try {
+            // Trim leading and trailing whitespace
+            fct_str.erase(0, fct_str.find_first_not_of(" \n\r\t"));
+            fct_str.erase(fct_str.find_last_not_of(" \n\r\t") + 1);
+
+            if (!fct_str.empty()) {
+                double fct_value = std::stod(fct_str);
+                fct_values.push_back(fct_value);
+                //std::cout << "Parsed FCT: " << fct_value << std::endl;
+            }
+        } catch (const std::invalid_argument&) {
+            std::cerr << "Invalid FCT value: \"" << fct_str << "\"" << std::endl;
+        }
+    }
+
+    // Calculate and log statistics
+    if (!fct_values.empty()) {
         double sum = std::accumulate(fct_values.begin(), fct_values.end(), 0.0);
         double mean = sum / fct_values.size();
 
-        double sq_sum = std::inner_product(fct_values.begin(), fct_values.end(), fct_values.begin(), 0.0);
-        double std_dev = std::sqrt(sq_sum / fct_values.size() - mean * mean);
+        double variance = 0.0;
+        for (double fct : fct_values) {
+            variance += (fct - mean) * (fct - mean);
+        }
+        variance /= fct_values.size();
+
+        double std_dev = std::sqrt(variance);
 
         // Log flow completion times and statistics
         std::ofstream log_file(save_dir + "/flow_completion_time.log");
@@ -245,9 +305,22 @@ void handle_client(int client_socket, sockaddr_in client_addr, int port) {
         log_file << "Standard Deviation FCT: " << std_dev << "\n";
         log_file.close();
 
-        // Print the mean and standard deviation
-        std::cout << "Mean FCT: " << mean << " ms\n";
-        std::cout << "Standard Deviation FCT: " << std_dev << " ms\n";
+        std::cout << "Mean FCT: " << mean << " ms, Standard Deviation FCT: " << std_dev << " ms" << std::endl;// Send success response to client
+        std::string success_response = "HTTP/1.1 200 OK\r\n"
+                                       "Content-Type: text/plain\r\n"
+                                       "Content-Length: 7\r\n"
+                                       "\r\n"
+                                       "SUCCESS";
+        send(client_socket, success_response.c_str(), success_response.size(), 0);
+    } else {
+        std::cerr << "No valid FCT values received." << std::endl;
+        // Send error response to client
+        std::string error_response = "HTTP/1.1 400 Bad Request\r\n"
+                                     "Content-Type: text/plain\r\n"
+                                     "Content-Length: 21\r\n"
+                                     "\r\n"
+                                     "No valid FCT received";
+        send(client_socket, error_response.c_str(), error_response.size(), 0);
     }
 
     // Stop the BPF trace
