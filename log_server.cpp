@@ -20,6 +20,10 @@
 #include <algorithm>
 #include <cmath>
 
+#include <ctime>      // For time-related functions
+#include <iomanip>    // For std::put_time
+#include <sstream>    // For std::ostringstream
+
 // Function to execute a command
 void execute_command(const std::string& command) {
     int result = system(command.c_str());
@@ -98,7 +102,7 @@ pid_t run_bpftrace(const std::string& save_dir, const std::string& client_ip) {
 
     if (pid == 0) {
         const char* command = "sudo";
-        const char* script = "./run_bpftrace2.sh";
+        const char* script = "./run_tracepoint.sh";
         execlp(command, command, script, save_dir.c_str(), client_ip.c_str(), nullptr);
 
         std::cerr << "Failed to execute bpftrace script." << std::endl;
@@ -208,8 +212,17 @@ void handle_client(int client_socket, sockaddr_in client_addr, int port) {
     std::string server_ip = get_server_ip();  // Replace with actual function to get server IP
     std::string download_url = "http://" + server_ip + "/" + file_name;
 
-    // Start BPF trace
-    std::string save_dir = congestion_control + "_" + std::to_string(flow_size) + "_" + std::to_string(repeat_number) + "_" + std::to_string(time(nullptr));
+    // Get the current time
+    std::time_t t = std::time(nullptr);
+    std::tm tm = *std::localtime(&t);
+
+    // Create a string stream to format the time
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%d-%H-%M-%S");
+    std::string time_str = oss.str();
+
+    // Build the save_dir string with the formatted time
+    std::string save_dir = congestion_control + "_" + std::to_string(flow_size) + "_" + std::to_string(repeat_number) + "_" + time_str;
     pid_t bpf_process = run_bpftrace(save_dir, client_ip_str);
 
     // Send download URL to client
@@ -296,7 +309,7 @@ void handle_client(int client_socket, sockaddr_in client_addr, int port) {
         double std_dev = std::sqrt(variance);
 
         // Log flow completion times and statistics
-        std::ofstream log_file(save_dir + "/flow_completion_time.log");
+        std::ofstream log_file("result/" + save_dir + "/flow_completion_time.log");
         log_file << "Index,FCT\n";
         for (size_t i = 0; i < fct_values.size(); ++i) {
             log_file << i << "," << fct_values[i] << "\n";

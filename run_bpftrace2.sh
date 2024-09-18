@@ -38,6 +38,12 @@ echo "elapsed_time,cwnd,srtt,minrtt,ssthresh,is_slow_start" > "$SAVE_DIR/cwnd.cs
 
 # Start BPF tracing
 sudo bpftrace -e '
+BEGIN
+{
+    @start_time = nsecs;
+    @minrtt = 18446744073709551615; // Initialize minrtt to maximum possible unsigned 64-bit integer
+}
+
 tracepoint:tcp:tcp_probe
 {
     $target_ip = '$IP_HEX_REVERSED';
@@ -54,13 +60,9 @@ tracepoint:tcp:tcp_probe
                  ((uint32)(args->daddr[6]) << 16) |
                  ((uint32)(args->daddr[7]) << 24);
 
-    if ($daddr_hex == $target_ip) {
-        // Set the start time upon the first IP match
-        if (@start_time == 0) {
-            @start_time = nsecs;
-            @minrtt = 18446744073709551615; // Initialize minrtt to maximum possible unsigned 64-bit integer
-        }
+    $daddr_hex = ntop(args->daddr->sin6_addr)
 
+    if ($daddr_hex == $target_ip) {
         // Calculate elapsed time
         $elapsed_ns = nsecs - @start_time;
         $elapsed_seconds = $elapsed_ns / 1000000000;
